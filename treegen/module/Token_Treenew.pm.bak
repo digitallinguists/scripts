@@ -1,0 +1,514 @@
+package Token_Treenew;
+use strict;
+
+use Graph;
+use Template;
+
+#use Database;
+#use Token;
+#use Entry;
+
+my ($debug_text,$sanity);
+
+sub new {
+    my $proto = shift;
+    my $class = ref($proto) || $proto;
+    my $self = {};
+    $self->{tree} = "";
+    $self->{title} = "";
+    $self->{sentence_id} = "";
+    bless $self,$class;
+
+    my @args = @_;
+    if (@args == 1) {
+      $self->from_sentence_id(shift);
+    } else {
+      $self->parse_bracket_output(@args);
+    }
+
+    return $self;
+}
+
+sub id_tree {
+  my $self = shift;
+  if (@_) { $self->{tree} = shift; }
+  return $self->{tree};
+}
+
+sub get_terminal_tokens {
+  my $self = shift;
+  return $self->get_generation_ids_sorted(1);
+}
+
+sub title {
+  my $self = shift;
+  if (@_) { $self->{title} = shift; }
+  return  $self->{title};
+}
+
+sub sentence_id {
+  my $self = shift;
+  if (@_) { $self->{sentence_id} = shift; }
+  return $self->{sentence_id};
+}
+
+#--------------- debugging -----------------
+
+sub get_debug_info {
+  my $self = shift;
+  return $debug_text;
+}
+
+sub get_sanity_info {
+  my $self = shift;
+  return $sanity;
+}
+
+#---------------- filling the tree -----------------
+
+sub from_sentence_id {
+  my $self = shift;
+  my $sentence_id = shift;
+  if ($sentence_id) { $self->sentence_id($sentence_id); }
+  else { $sentence_id = $self->sentence_id; }
+
+  my $tree = Graph->new;
+
+  my (%terminal,%non,%children); # sanity check
+
+  my $db = Database->new;
+  my %tokens = $db->get_tokens($self->sentence_id);
+  foreach my $id ( keys %tokens) {
+    $debug_text .= "token id $id ";
+    my $token = Token->new($tokens{$id});
+    my $entry_id = $token->entry_id;
+    my $entry = Entry->new;
+    $entry->id($entry_id);
+
+    if ($token->position) { # terminal token
+      $terminal{$id}++;
+      my $gloss = $entry->gloss_de;
+      unless ($gloss) { $gloss = "<br>"; }
+      my $name = $entry->simplified . "<br>" . $gloss;
+      $tree->add_vertex($id);
+      $tree->set_attribute("content",$id,$name);
+      $tree->set_attribute("order",$id,$token->position);
+
+      $debug_text .= "terminal token, position: " . $token->position . "<br>\n";
+
+    } else {
+      $non{$id}++;
+      my $name = $entry->entry_name;
+      $tree->add_vertex($id);
+      $tree->set_attribute("content",$id,$name);
+      $debug_text .= "non terminal token ($name) <br>\n";
+      my $children;
+      foreach my $attribute ("operator","operand1","operand2") {
+	no strict;
+	if ($token->$attribute) {
+	  $children{$token->$attribute}++;
+	  $children++;
+	  $tree->add_edge($id,$token->$attribute);
+	  $tree->set_attribute($attribute,$id,$token->$attribute);
+	  $debug_text .= "$attribute: $id -> ". $token->$attribute."<br>\n";
+	}
+      }
+      unless ($children) { $debug_text .= "no children for $id<br>\n"; }
+      else { $debug_text .= "$children children for $id<br>\n"; }
+    }
+  }
+
+  # sanity check:
+  foreach my $child (keys %children) {
+    unless ($terminal{$child} || $non{$child}) {
+      $sanity .= "token $child is not among the terminal or non-terminal tokens for this sentence in the database.<br>";
+    }
+  }
+
+  $self->id_tree($tree);
+  #$self->set_generations;
+  #$self->set_order_within_generations;
+}
+
+sub parse_bracket_output {
+  my $self = shift;
+  my $tree = Graph->new;
+
+  foreach (@_) {
+    my ($id,$father,$name) = split /\|/;
+
+    # unser root node hat keinen Vater, wird aber durch das Verfahren
+    # trotzdem gesetzt:
+    if ($father) { $tree->add_edge($father,$id); }
+
+    # für die erste Generation ist die $id auch gleich die order
+    # innerhalb der Generation, für die anderen wird es später
+    # überschrieben (->set_order_within_generations).
+    $tree->set_attribute("order",$id,$id);
+    $tree->set_attribute("content",$id,$name);
+  }
+
+  $self->id_tree($tree);
+  #$self->set_generations;
+  #$self->set_order_within_generations;
+}
+
+sub parse_file {
+  my $self = shift;
+  my $file = shift;
+  open(IN,$file) or die "cannot open $file: $!";
+  my @lines;
+  while (<IN>) {
+    if (/|.*|/) { chomp $_; push @lines,$_; }
+  }
+  close IN;
+  $self->parse_bracket_output(@lines);
+}
+
+#------------------ generations -------------------
+
+sub set_generations {
+  my $self = shift;
+  my $tree = $self->id_tree;
+
+  my %generations = $self->collect_generations_from_leaves($tree);
+  $self->{generations} = \%generations;
+
+  my @generations = sort {$a <=> $b} keys %generations;
+  my $max = $generations[$#generations];
+  $self->{number_of_generations} = $max;
+
+  foreach my $g (keys %generations) {
+    foreach my $id (@{$generations{$g}}) {
+      $tree->set_attribute("generation",$id,$g);
+    }
+  }
+
+  $tree->set_attribute("generation_type","from_leaves");
+  $self->id_tree($tree);
+}
+
+sub collect_generations_from_leaves {
+  my $self = shift;
+  my ($tree_orig,$generations,$n) = @_;
+  my $tree = $tree_orig->copy;
+  my %generations;
+  if ($generations) { %generations = %{$generations}; }
+  $n++;
+
+  #my @source = $tree->source_vertices;
+  my @leaves = $tree->sink_vertices;
+  push @leaves,$tree->isolated_vertices;
+  if (@leaves) {
+    $generations{$n} = \@leaves;
+    $tree->delete_vertices(@leaves);
+    $self->collect_generations_from_leaves($tree,\%generations,$n);
+  } else { return %generations; }
+}
+
+sub get_number_of_generations {
+  my $self = shift;
+  unless ($self->{number_of_generations}) { $self->set_generations; }
+  return $self->{number_of_generations};
+}
+
+sub get_generation_hash {
+  my $self = shift;
+  unless ($self->{generations}) { $self->set_generations; }
+  return %{$self->{generations}};
+}
+
+sub set_order_within_generations {
+  my $self = shift;
+  my $tree = $self->id_tree;
+  my %generations = $self->get_generation_hash;
+
+#  $debug_text .= "<br>\n";
+#  $debug_text .= "* in set_order_within_generations<br>\n";
+
+  # bei der ersten Generation entspricht die order der id (siehe
+  # ->parse_bracket_output), von dort aus können wir die order der
+  # anderen innerhalb ihrer Generation neu bestimmen:
+
+  foreach my $g (sort {$a <=> $b} keys %generations) {
+    $debug_text .= "generation $g<br>\n";
+    if ($g == 1) { next; } # unsere erste Generation ... die haben wir schon
+    my @ids = @{$generations{$g}};
+
+    # die nodes dieser Generation werden nach der "order" ihres ersten
+    # Nachkommen sortiert (obwohl es wahrscheinlich jeder beliebige
+    # Nachkomme täte ..."
+
+    my %first;
+    foreach my $id (@ids) {
+      my @suc = $tree->successors($id);
+      @suc = sort { $tree->get_attribute("order",$a)
+		      <=> $tree->get_attribute("order",$b) } @suc;
+
+      # wir holen uns die order des ersten successors
+      $first{$id} = $tree->get_attribute("order",$suc[0]);
+
+      foreach my $s (@suc) {
+	unless ($tree->get_attribute("order",$s)) {
+	  $debug_text .= "no order for $s!<br>\n";
+	}
+      }
+    }
+
+    my $n;
+    foreach my $id (sort {$first{$a} <=> $first{$b}} @ids) {
+      $n++;
+      $tree->set_attribute("order",$id,$n);
+    }
+  }
+
+  $tree->set_attribute("order","1");
+  $self->id_tree($tree);
+}
+
+sub get_generation_ids_sorted {
+  my $self = shift;
+  my $generation = shift;
+  my $tree = $self->id_tree;
+
+  unless ($tree->get_attribute("order")) {
+    $self->set_order_within_generations;
+  }
+
+  my %generations = $self->get_generation_hash;
+  my @members;
+  if ($generations{$generation}) {
+    @members = sort {
+      $tree->get_attribute("order",$a) <=> $tree->get_attribute("order",$b)
+    } @{$generations{$generation}};
+  }
+  return @members;
+}
+
+#------------------- Lehmann Tabellen Berechnung -----------------
+
+sub get_table {
+  my $self = shift;
+  my ($caption,$template) = @_;
+  unless ($template) { $template = 'tree_table.tmpl'; }
+  my %params = $self->get_table_params;
+  $params{caption} = $caption;
+  my $t = HTML::Template->new(filename => $template);
+  $t->param( %params );
+  return $t->output;
+}
+
+sub print_table {
+  my $self = shift;
+  print $self->get_table(@_);
+}
+
+sub set_table_positions {
+  my $self = shift;
+  my $tree = $self->id_tree;
+  my %generations = $self->get_generation_hash;
+
+  # bei den tokens der ersten Generation entpricht die linke table
+  # position der doppelten "order" -1
+
+  foreach my $id (@{$generations{1}}) {
+    my $order = $tree->get_attribute("order",$id);
+    my $pos = 2 * $order - 1;
+    $tree->set_attribute("pos",$id,$pos);
+  }
+
+  # jetzt können wir von den terminal tokens aus die position der anderen
+  # bestimmen:
+
+  foreach my $g (sort {$a <=> $b} keys %generations) {
+    if ($g == 1) { next; } # unsere erste Generation ... die haben wir schon
+    foreach my $id (@{$generations{$g}}) {
+      my @suc = $tree->successors($id);
+      @suc = sort { $tree->get_attribute("pos",$a)
+		      <=> $tree->get_attribute("pos",$b) } @suc;
+      my $first = $tree->get_attribute("pos",$suc[0]);
+      my $last  = $tree->get_attribute("pos",$suc[$#suc]);
+      my $pos   = int(($first + $last ) / 2);
+      $tree->set_attribute("pos",$id,$pos);
+    }
+  }
+
+  $tree->set_attribute("pos","1");
+  $self->id_tree($tree);
+}
+
+sub get_table_params { # für tree_table.tmpl
+  my $self = shift;
+  $self->set_table_positions;
+
+  my $tree = $self->id_tree;
+  my $width = $self->get_terminal_tokens * 2;
+
+  my @tr_loop;
+
+  my %open_lines; # für generationen übergreifende linien ...
+  my $generations = $self->get_number_of_generations;
+
+  while ($generations) {
+
+    my @ids = $self->get_generation_ids_sorted($generations);
+
+    ### content row ###
+
+    my @td_loop;
+
+    my $cur = 1;
+    foreach my $id (@ids) {
+
+      my $content = $tree->get_attribute("content",$id);
+      my $pos = $tree->get_attribute("pos",$id);
+
+#      $debug_text .= "id $id, content $content, pos $pos<br>";
+
+      # etwaige Zellen vor unserem Feld
+      unless ($pos == 1) {
+	my $diff = $pos - $cur;
+	for ( 1 .. $diff) {
+	  if ($open_lines{$cur} &&
+	      $open_lines{$cur} < $generations) {
+	    push @td_loop,{ class => "border_l" }
+	  } else {
+	    push @td_loop,{};
+	  }
+	  $cur++;
+	}
+      }
+
+      # das Feld selbst
+      push @td_loop,{ content => $content };
+      $cur += 2;
+
+      # etwaige Schlußzellen
+      if ($id eq $ids[$#ids]) {
+
+	my $rest = $width - $cur + 1;
+	if ($rest) {
+	  for ( 1 .. $rest) {
+	    if ($open_lines{$cur} &&
+	      $open_lines{$cur} < $generations) {
+	      push @td_loop,{ class => "border_l" }
+	    } else {
+	      push @td_loop,{};
+	    }
+	    $cur++;
+	  }
+	}
+      }
+    }
+
+    ### line row ###
+
+    my @tl_loop;
+
+    unless ($generations == 1) {
+
+      # unter der ersten haben wir keine Lininen mehr, oder doch?
+      # -> Kategorien - Einträge ...
+
+      my $cur = 1;
+      foreach my $id (@ids) {
+
+	my @suc = $tree->successors($id);
+	@suc = sort { $tree->get_attribute("pos",$a)
+			<=> $tree->get_attribute("pos",$b) } @suc;
+
+	# bis zu welcher generation gehen die Nachkommen?
+
+	foreach my $suc (@suc) {
+	  my $pos = $tree->get_attribute("pos",$suc);
+	  my $gen = $tree->get_attribute("generation",$suc);
+	  $open_lines{$pos + 1} = $gen;
+	}
+
+	my $first_pos = $tree->get_attribute("pos",$suc[0]);
+	my $last_pos = $tree->get_attribute("pos",$suc[$#suc]);
+
+	# wir behandeln alle Zellen von $cur bis $last_pos ...
+	# ... es sei denn, es handelt sich um die letzte id
+
+	my $last = $last_pos + 1;
+	if ($id eq $ids[$#ids]) { $last = $width; }
+
+	foreach my $n ($cur .. $last) {
+	  $cur++;
+	  my $lines = "";
+
+	  # innerhalb unseres Nachkommen ranges? -> t
+	  if ($n > $first_pos && $n <= $last_pos) {
+	    $lines .= "t";
+	  }
+
+	  # offene Generationen übergreifende Linien?
+	  if ($open_lines{$n} &&
+	      $open_lines{$n} < $generations) {
+	    $lines .= "l";
+	  }
+
+	  if ($lines) {
+	    push @tl_loop,{ class => "border_".$lines, };
+	  } else {
+	    push @tl_loop,{};
+	  }
+	}
+      }
+
+    }
+
+    push @tr_loop,{ td => \@td_loop };
+    if (@tl_loop) { push @tr_loop,{ td => \@tl_loop }; }
+
+    $generations--;
+
+  }
+
+  # parameter für template ...
+  my %param = (
+	       caption => $self->title,
+	       tr => \@tr_loop,
+	      );
+
+}
+
+
+1;
+
+
+__END__
+
+=head1 NAME
+
+Token_Tree
+
+=head1 NECCESSARY OTHER MODULES AND FILES
+
+  CPAN:       Graph, HTML::Template
+  templates:  'tree_table_page.tmpl', 'tree_table.tmpl'
+  Jachimume:  Database, Token, Entry, mltd
+
+=head1 SYNOPSIS
+
+  use Token_Tree;
+
+  my $tree = Token_Tree->new($sentence_id);
+  my $tree = Token_Tree->new(@bracket_script_output);
+
+  # or:
+  my $tree = Token_Tree->new();
+  tree->parse_file($file); # file im format wie @bracket_script_output
+
+  my $caption = "Demo Tree";
+  my $template = "tree_table.tmpl";
+
+  $tree->print_table($caption,$template);
+  $tree->print_table($caption); # default: "tree_table.tmpl"
+
+  # or:
+  my $table = $tree->get_table($caption,$template);
+  my $table = $tree->get_table($caption);
+
+

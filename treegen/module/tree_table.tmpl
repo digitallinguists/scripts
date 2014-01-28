@@ -1,0 +1,10 @@
+<TMPL_IF NAME="comments"><hr><TMPL_VAR NAME="comments"><hr></TMPL_IF>
+<table border="0" cellpadding="0" cellspacing="0" class="insert" style='font-size: 10pt'>
+<caption><TMPL_VAR NAME="caption"></caption>
+<TMPL_LOOP NAME="tr"><tr>
+<TMPL_LOOP NAME="td">
+<td <TMPL_IF NAME="content">colspan="2" align="center"</TMPL_IF><TMPL_IF NAME="class">class="<TMPL_VAR NAME="class">"</TMPL_IF>><TMPL_VAR NAME="content_debug"><TMPL_UNLESS NAME="content"><br></TMPL_UNLESS><TMPL_VAR NAME="content">
+</td></TMPL_LOOP>
+</tr></TMPL_LOOP>
+</table>
+
